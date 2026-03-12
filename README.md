@@ -1,3 +1,391 @@
+ # litetrace
+
+ 基于 Linux `ftrace` 的轻量级命令行跟踪工具，类似简化版的 `trace-cmd`，用于学习和演示内核函数调用跟踪。
+
+ - **功能聚焦**：只支持 `function tracer`
+ - **零内核改动**：完全用户态，读写 `tracefs` 控制文件
+ - **简单易用**：一组子命令完成配置、启动、停止与导出
+
+ > 本项目最初用于 Linux 系统编程课程实验，因此同时提供了比较完整的模块化设计；普通用户只需要关注「快速上手」和「命令说明」即可。
+
+ ---
+
+ ## 目录
+
+ - [特性](#特性)
+ - [环境要求](#环境要求)
+ - [构建](#构建)
+ - [快速上手](#快速上手)
+ - [命令说明](#命令说明)
+ - [输出示例](#输出示例)
+ - [测试建议](#测试建议)
+ - [项目结构](#项目结构)
+ - [实现与设计概览](#实现与设计概览)
+
+ ---
+
+ ## 特性
+
+ - **设置 tracer**
+   - 将当前 tracer 设置为 `function`
+   - 在写入前检查内核是否真的支持 `function tracer`
+ - **函数过滤**
+   - 支持单个函数名：如 `do_sys_open`
+   - 支持通配符：如 `vfs_*`
+   - 支持清空过滤器
+ - **动态启停**
+   - 开启 / 关闭 `tracing_on`
+   - 严格模式：只有在 `current_tracer` 为 `function` 时才允许 `start`
+ - **状态查看**
+   - 固定打印三项状态：
+     - `current_tracer`
+     - `tracing_on`
+     - `set_ftrace_filter`
+ - **结果导出**
+   - 直接将 `trace` 内容打印到终端
+   - 或导出到指定文件，便于离线分析
+
+ ---
+
+ ## 环境要求
+
+ - Linux 内核启用了 `ftrace` 功能
+ - 用户态可访问的 `tracefs` 路径之一存在：
+   - `/sys/kernel/tracing`
+   - `/sys/kernel/debug/tracing`
+ - 需要 `root` 权限执行大部分命令：
+   - 例如：`sudo ./litetrace tracer function`
+
+ ---
+
+ ## 构建
+
+ ```bash
+ git clone <your-repo-url> litetrace
+ cd litetrace
+ make
+ ```
+
+ 要求：
+
+ - 使用 `gcc`
+ - 编译参数：`-Wall -Wextra -O2`
+ - 成功后在项目根目录得到可执行文件：
+
+ ```bash
+ ./litetrace -h
+ ```
+
+ ---
+
+ ## 快速上手
+
+ 以下命令均建议在 `sudo` 下运行。
+
+ ```bash
+ # 查看当前状态
+ sudo ./litetrace status
+
+ # 将 tracer 设置为 function
+ sudo ./litetrace tracer function
+
+ # 只跟踪 do_sys_open
+ sudo ./litetrace filter do_sys_open
+
+ # 开启跟踪
+ sudo ./litetrace start
+
+ # 在另外一个终端做一些操作触发系统调用，例如：
+ #   ls
+ #   cat /etc/hostname
+
+ # 关闭跟踪
+ sudo ./litetrace stop
+
+ # 把 trace 结果直接打印到终端
+ sudo ./litetrace dump
+
+ # 或者导出到文件
+ sudo ./litetrace dump -o result.txt
+ ```
+
+ ---
+
+ ## 命令说明
+
+ 所有子命令都采用 `litetrace <subcommand> [options]` 的形式。
+
+ ### 帮助
+
+ ```bash
+ ./litetrace -h
+ ./litetrace --help
+ ```
+
+ 打印使用说明和所有子命令列表。
+
+ ---
+
+ ### 1. `tracer` — 设置当前 tracer
+
+ ```bash
+ sudo ./litetrace tracer function
+ ```
+
+ - 仅支持 `function` 这一种 tracer
+ - 内部逻辑：
+   - 读取 `available_tracers`
+   - 检查其中是否包含 `function`
+   - 若不支持则报错退出
+   - 否则写入 `current_tracer`
+
+ 典型输出：
+
+ ```text
+ [OK] tracer set to function
+ ```
+
+ 若内核未支持 `function`，会提示：
+
+ ```text
+ [ERR] tracer 'function' is not available on this system
+ ```
+
+ ---
+
+ ### 2. `filter` / `filter-clear` — 配置函数过滤器
+
+ ```bash
+ # 设置过滤器
+ sudo ./litetrace filter do_sys_open
+ sudo ./litetrace filter vfs_*
+
+ # 清空过滤器
+ sudo ./litetrace filter-clear
+ ```
+
+ - 对应 `set_ftrace_filter` 控制文件
+ - 支持函数名与通配符
+ - 清空时向文件写入空内容
+
+ 输出示例：
+
+ ```text
+ [OK] filter set to do_sys_open
+ [OK] filter cleared
+ ```
+
+ 参数缺失时会给出错误提示并附带 usage：
+
+ ```text
+ [ERR] missing argument
+ Usage:
+   ./litetrace tracer function
+   ./litetrace filter <func|pattern>
+   ...
+ ```
+
+ ---
+
+ ### 3. `start` / `stop` — 开启与关闭 tracing
+
+ ```bash
+ sudo ./litetrace start
+ sudo ./litetrace stop
+ ```
+
+ - `start`：
+   - 先读取 `current_tracer`
+   - 只有当其为 `function` 时才继续
+   - 向 `tracing_on` 写入 `"1"`
+ - `stop`：
+   - 向 `tracing_on` 写入 `"0"`
+
+ 输出示例：
+
+ ```text
+ [OK] tracing started
+ [OK] tracing stopped
+ ```
+
+ 若当前 tracer 不是 `function`，会提示先运行 `tracer function`：
+
+ ```text
+ [ERR] current_tracer is '<something>', please run 'litetrace tracer function' first
+ ```
+
+ ---
+
+ ### 4. `status` — 查看当前配置状态
+
+ ```bash
+ sudo ./litetrace status
+ ```
+
+ 固定打印三行信息，便于检查：
+
+ ```text
+ current_tracer     : function
+ tracing_on         : 1
+ set_ftrace_filter  : do_sys_open
+ ```
+
+ 当过滤器为空时：
+
+ ```text
+ set_ftrace_filter  : <empty>
+ ```
+
+ ---
+
+ ### 5. `dump` — 导出 trace 结果
+
+ ```bash
+ # 输出到标准输出
+ sudo ./litetrace dump
+
+ # 导出到文件
+ sudo ./litetrace dump -o result.txt
+ ```
+
+ 内部实现：
+
+ - 循环读取 `trace` 文件（大缓冲区）
+ - 若未指定 `-o`：
+   - 直接写到 `stdout`
+ - 若指定 `-o <file>`：
+   - 写入目标文件，完成后打印：
+
+   ```text
+   [OK] trace dumped to result.txt
+   ```
+
+ 参数错误示例：
+
+ ```bash
+ sudo ./litetrace dump -o          # 参数缺失
+ sudo ./litetrace dump --xxx       # 未知选项
+ ```
+
+ - 会返回参数错误，并打印 usage。
+
+ ---
+
+ ## 输出示例
+
+ 一次典型的跟踪流程：
+
+ ```bash
+ sudo ./litetrace tracer function
+ sudo ./litetrace filter do_sys_open
+ sudo ./litetrace start
+
+ # 触发文件相关系统调用
+ ls
+ cat /etc/hostname
+
+ sudo ./litetrace stop
+ sudo ./litetrace dump -o result.txt
+ ```
+
+ `result.txt` 中可见类似如下的 `function tracer` 输出：
+
+ ```text
+ <task-name>-<pid> [cpu] .... timestamp: function <- caller
+ ...
+ ```
+
+ 例如（截取自真实运行）：
+
+ ```text
+ litetrace-1211172 [000] ...1. 266638.173704: insn_decode <-text_poke_loc_init
+ litetrace-1211172 [000] ...1. 266638.173705: text_poke_queue <-ftrace_replace_code
+ ...
+ ```
+
+ ---
+
+ ## 测试建议
+
+ 项目自带一份更详细的测试文档 `TESTING.md`，这里给出最核心的场景：
+
+ 1. **基础命令**
+    - `./litetrace -h` 打印帮助
+    - 非 root 运行 `./litetrace start`，提示权限不足：
+      - `[ERR] permission denied, please run as root`
+ 2. **配置 tracer 与过滤器**
+    - `sudo ./litetrace tracer function`
+    - `sudo ./litetrace filter do_sys_open`
+    - `sudo ./litetrace status` 中三行输出符合预期
+ 3. **启停与导出**
+    - `sudo ./litetrace start`
+    - 执行一些文件操作
+    - `sudo ./litetrace stop`
+    - `sudo ./litetrace dump -o result.txt`
+    - 检查 `result.txt` 非空，且包含相关函数调用。
+
+ 更多边界与异常场景（非法参数、未知命令等）可参考 `TESTING.md`。
+
+ ---
+
+ ## 项目结构
+
+ ```text
+ litetrace/
+ ├── main.c           # 程序入口，参数解析与命令分发
+ ├── tracefs.h/.c     # tracefs 路径与上下文定义与探测
+ ├── file_util.h/.c   # 通用文件读写封装
+ ├── tracer_ctrl.h/.c # 业务控制：tracer/filter/start/stop/status/dump
+ ├── output.h/.c      # 统一输出与错误信息
+ ├── TESTING.md       # 测试用例与步骤
+ ├── Makefile         # 构建脚本
+ └── README.md        # 项目说明（本文档）
+ ```
+
+ ---
+
+ ## 实现与设计概览
+
+ 若你对实现细节和模块设计感兴趣，下面是一个简要概览（对应源码实现）：
+
+ - `tracefs` 模块
+   - 职责：探测 tracefs 根目录，并构造以下控制文件路径：
+     - `current_tracer`
+     - `tracing_on`
+     - `set_ftrace_filter`
+     - `trace`
+     - `available_tracers`
+   - 探测顺序：
+     1. `/sys/kernel/tracing`
+     2. `/sys/kernel/debug/tracing`
+ - `file_util` 模块
+   - 提供简单安全的文本文件读写接口：
+     - `read_text_file`
+     - `write_text_file`
+     - `write_empty_file`
+   - 封装了缓冲区大小检查、`\0` 终止与部分写入处理。
+ - `tracer_ctrl` 模块
+   - 封装所有业务逻辑：
+     - `lt_set_tracer`
+     - `lt_set_filter`
+     - `lt_clear_filter`
+     - `lt_start`
+     - `lt_stop`
+     - `lt_status`
+     - `lt_dump`
+   - 对外暴露的是「命令级别」的接口，`main.c` 只负责分发与参数校验。
+ - `output` 模块
+   - 统一输出前缀：
+     - 成功：`[OK] ...`
+     - 错误：`[ERR] ...`
+   - 实现简单的 `print_ok/print_err/print_info/print_usage` 封装。
+
+ 这套设计尽量保持了：
+
+ - 清晰的模块边界
+ - 便于在课堂中展示「分层 + 封装」的系统编程风格
+ - 代码量适中，便于阅读与扩展
+
 下面这份可以直接贴给 Cursor 作为实现说明。内容按“项目目标 → 架构 → 模块 → 接口 → 数据结构 → 命令流程 → 错误处理 → 测试 → 开发约束”的顺序写，尽量让 Cursor 能按文档一步步生成代码。
 
 ------
